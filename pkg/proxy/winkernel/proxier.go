@@ -29,8 +29,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Microsoft/hcsshim"
-	"github.com/Microsoft/hcsshim/hcn"
+	"github.com/Microsoft/hnslib"
+	"github.com/Microsoft/hnslib/hcn"
 	v1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -73,7 +73,7 @@ type WindowsKernelCompatTester struct{}
 
 // IsCompatible returns true if winkernel can support this mode of proxy
 func (lkct WindowsKernelCompatTester) IsCompatible() error {
-	_, err := hcsshim.HNSListPolicyListRequest()
+	_, err := hnslib.HNSListPolicyListRequest()
 	if err != nil {
 		return fmt.Errorf("Windows kernel is not compatible for Kernel mode")
 	}
@@ -238,11 +238,11 @@ type DualStackCompatTester struct{}
 
 func (t DualStackCompatTester) DualStackCompatible(networkName string) bool {
 	hcnImpl := newHcnImpl()
-	// First tag of hcsshim that has a proper check for dual stack support is v0.8.22 due to a bug.
+	// First tag of hnslib that has a proper check for dual stack support is v0.8.22 due to a bug.
 	if err := hcnImpl.Ipv6DualStackSupported(); err != nil {
 		// Hcn *can* fail the query to grab the version of hcn itself (which this call will do internally before parsing
 		// to see if dual stack is supported), but the only time this can happen, at least that can be discerned, is if the host
-		// is pre-1803 and hcn didn't exist. hcsshim should truthfully return a known error if this happened that we can
+		// is pre-1803 and hcn didn't exist. hnslib should truthfully return a known error if this happened that we can
 		// check against, and the case where 'err != this known error' would be the 'this feature isn't supported' case, as is being
 		// used here. For now, seeming as how nothing before ws2019 (1809) is listed as supported for k8s we can pretty much assume
 		// any error here isn't because the query failed, it's just that dualstack simply isn't supported on the host. With all
@@ -677,7 +677,7 @@ func NewProxier(
 	nodeIP net.IP,
 	recorder events.EventRecorder,
 	healthzServer *healthcheck.ProxierHealthServer,
-	healthzBindAddress string,
+	healthzPort int,
 	config config.KubeProxyWinkernelConfiguration,
 ) (*Proxier, error) {
 	if nodeIP == nil {
@@ -686,14 +686,8 @@ func NewProxier(
 	}
 
 	// windows listens to all node addresses
-	nodePortAddresses := proxyutil.NewNodePortAddresses(ipFamily, nil)
-	serviceHealthServer := healthcheck.NewServiceHealthServer(hostname, recorder, nodePortAddresses, healthzServer)
-
-	var healthzPort int
-	if len(healthzBindAddress) > 0 {
-		_, port, _ := net.SplitHostPort(healthzBindAddress)
-		healthzPort, _ = strconv.Atoi(port)
-	}
+	nodeAddressHandler := proxyutil.NewNodeAddressHandler(ipFamily, nil)
+	serviceHealthServer := healthcheck.NewServiceHealthServer(hostname, recorder, nodeAddressHandler, healthzServer)
 
 	hcnImpl := newHcnImpl()
 	hns, supportedFeatures := newHostNetworkService(hcnImpl)
@@ -814,14 +808,14 @@ func NewDualStackProxier(
 	nodeIPs map[v1.IPFamily]net.IP,
 	recorder events.EventRecorder,
 	healthzServer *healthcheck.ProxierHealthServer,
-	healthzBindAddress string,
+	healthzPort int,
 	config config.KubeProxyWinkernelConfiguration,
 ) (proxy.Provider, error) {
 
 	// Create an ipv4 instance of the single-stack proxier
 	ipv4Proxier, err := NewProxier(v1.IPv4Protocol, syncPeriod, minSyncPeriod,
 		hostname, nodeIPs[v1.IPv4Protocol], recorder, healthzServer,
-		healthzBindAddress, config)
+		healthzPort, config)
 
 	if err != nil {
 		return nil, fmt.Errorf("unable to create ipv4 proxier: %v, hostname: %s, nodeIP:%v", err, hostname, nodeIPs[v1.IPv4Protocol])
@@ -829,7 +823,7 @@ func NewDualStackProxier(
 
 	ipv6Proxier, err := NewProxier(v1.IPv6Protocol, syncPeriod, minSyncPeriod,
 		hostname, nodeIPs[v1.IPv6Protocol], recorder, healthzServer,
-		healthzBindAddress, config)
+		healthzPort, config)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create ipv6 proxier: %v, hostname: %s, nodeIP:%v", err, hostname, nodeIPs[v1.IPv6Protocol])
 	}
@@ -1050,7 +1044,7 @@ func isNetworkNotFoundError(err error) bool {
 	if _, ok := err.(hcn.NetworkNotFoundError); ok {
 		return true
 	}
-	if _, ok := err.(hcsshim.NetworkNotFoundError); ok {
+	if _, ok := err.(hnslib.NetworkNotFoundError); ok {
 		return true
 	}
 	return false
@@ -1296,8 +1290,8 @@ func (proxier *Proxier) syncProxyRules() {
 			var err error
 
 			// targetPort is zero if it is specified as a name in port.TargetPort, so the real port should be got from endpoints.
-			// Note that hcsshim.AddLoadBalancer() doesn't support endpoints with different ports, so only port from first endpoint is used.
-			// TODO(feiskyer): add support of different endpoint ports after hcsshim.AddLoadBalancer() add that.
+			// Note that hnslib.AddLoadBalancer() doesn't support endpoints with different ports, so only port from first endpoint is used.
+			// TODO(feiskyer): add support of different endpoint ports after hnslib.AddLoadBalancer() add that.
 			if svcInfo.targetPort == 0 {
 				svcInfo.targetPort = int(ep.port)
 			}
